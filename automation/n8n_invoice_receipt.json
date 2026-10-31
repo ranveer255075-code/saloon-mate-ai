@@ -1,0 +1,107 @@
+{
+  "name": "SalonMate - Invoice Receipt Email",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "salonmate/invoice-receipt",
+        "responseMode": "lastNode",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "id": "invoice-webhook",
+      "name": "Invoice Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "salonmate-invoice-receipt",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Salon ERP Webhook Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $json.body ?? $json;\nconst required = ['invoice_id', 'invoice_number', 'customer', 'services', 'final_amount', 'payment_status', 'invoice_datetime'];\nconst missing = required.filter((key) => input[key] === undefined || input[key] === null || input[key] === '');\nif (missing.length || input.payment_status !== 'CONFIRMED' || !input.customer?.email || !Array.isArray(input.services) || !input.services.length) {\n  throw new Error(`Invalid invoice payload: ${missing.join(', ') || 'email, services, or payment status'}`);\n}\nconst escape = (value) => String(value ?? '').replace(/[&<>\\\"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[char]));\nconst money = (value) => `₹${Number(value || 0).toFixed(2)}`;\nconst rows = input.services.map((service) => `<tr><td>${escape(service.name)}</td><td>${service.quantity || 1}</td><td>${money(service.price)}</td><td>${money(Number(service.price || 0) * Number(service.quantity || 1))}</td></tr>`).join('');\nconst html = `<!doctype html><html><head><meta charset=\"utf-8\"><style>body{font-family:Arial,sans-serif;color:#292524;margin:36px}h1{color:#9f5f61;margin-bottom:4px}.muted{color:#78716c}.meta{display:flex;justify-content:space-between;margin:28px 0}.box{background:#fff7f7;border:1px solid #ead3d4;padding:16px;border-radius:8px}table{width:100%;border-collapse:collapse;margin-top:24px}th{background:#9f5f61;color:white;text-align:left}th,td{padding:11px;border-bottom:1px solid #e7e5e4}.totals{margin-left:auto;width:280px;margin-top:22px}.totals div{display:flex;justify-content:space-between;padding:5px}.grand{font-size:18px;font-weight:bold;border-top:2px solid #292524;margin-top:8px;padding-top:10px}</style></head><body><h1>${escape(input.salon?.name || 'Salon Management System')}</h1><div class=\"muted\">${escape(input.salon?.address)}<br>${escape(input.salon?.phone)} | ${escape(input.salon?.email)}</div><div class=\"meta\"><div class=\"box\"><b>Billed to</b><br>${escape(input.customer.name)}<br>${escape(input.customer.email)}<br>${escape(input.customer.phone)}</div><div><b>Invoice:</b> ${escape(input.invoice_number)}<br><b>Date:</b> ${escape(input.invoice_datetime)}<br><b>Payment:</b> ${escape(input.payment_method)}<br><b>Status:</b> PAID</div></div><table><thead><tr><th>Service</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table><div class=\"totals\"><div><span>Subtotal</span><span>${money(input.subtotal)}</span></div><div><span>Discount</span><span>- ${money(input.discount)}</span></div><div><span>Tax/GST</span><span>${money(input.tax)}</span></div><div class=\"grand\"><span>Final Amount</span><span>${money(input.final_amount)}</span></div></div><p class=\"muted\">Thank you for visiting us.</p></body></html>`;\nreturn [{ json: { ...input, receipt_html: html } }];"
+      },
+      "id": "build-receipt-html",
+      "name": "Validate and Build Receipt HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "if (!$json.receipt_pdf_base64) throw new Error('Missing backend-generated PDF');\nreturn [{ json: { ...$json }, binary: { data: { data: $json.receipt_pdf_base64, mimeType: 'application/pdf', fileName: $json.receipt_pdf_filename || ($json.invoice_number + '.pdf') } } }];"
+      },
+      "id": "prepare-pdf-file",
+      "name": "Prepare PDF Attachment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 0]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{$env.RECEIPT_FROM_EMAIL}}",
+        "toEmail": "={{$('Validate and Build Receipt HTML').item.json.customer.email}}",
+        "subject": "={{'Your salon receipt ' + $('Validate and Build Receipt HTML').item.json.invoice_number}}",
+        "emailType": "html",
+        "message": "={{$('Validate and Build Receipt HTML').item.json.receipt_html}}",
+        "attachments": "data",
+        "options": {}
+      },
+      "id": "send-receipt-email",
+      "name": "Send Receipt Email (SMTP)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [960, 0],
+      "continueOnFail": true,
+      "credentials": {
+        "smtp": {
+          "name": "Salon SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = $json;\nconst failed = Boolean(result.error || result.statusCode >= 400);\nreturn [{ json: { invoice_id: $('Validate and Build Receipt HTML').item.json.invoice_id, status: failed ? 'FAILED' : 'SENT', error: failed ? String(result.error?.message || result.message || 'Email delivery failed') : '', execution_id: $execution.id } }];"
+      },
+      "id": "delivery-status",
+      "name": "Prepare Delivery Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{($env.ERP_AUTOMATION_API_URL || 'http://127.0.0.1:8000') + '/api/automation/invoice-email-status'}}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "X-Receipt-Status-Key", "value": "={{$env.N8N_STATUS_API_KEY}}" }] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify($json)}}",
+        "options": {}
+      },
+      "id": "update-erp-status",
+      "name": "Update ERP Email Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 0]
+    }
+  ],
+  "connections": {
+    "Invoice Webhook": { "main": [[{ "node": "Validate and Build Receipt HTML", "type": "main", "index": 0 }]] },
+    "Validate and Build Receipt HTML": { "main": [[{ "node": "Prepare PDF Attachment", "type": "main", "index": 0 }]] },
+    "Prepare PDF Attachment": { "main": [[{ "node": "Send Receipt Email (SMTP)", "type": "main", "index": 0 }]] },
+    "Send Receipt Email (SMTP)": { "main": [[{ "node": "Prepare Delivery Status", "type": "main", "index": 0 }]] },
+    "Prepare Delivery Status": { "main": [[{ "node": "Update ERP Email Status", "type": "main", "index": 0 }]] }
+  },
+  "active": true,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "salonmate-invoice-receipt-v1",
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": []
+}
+           

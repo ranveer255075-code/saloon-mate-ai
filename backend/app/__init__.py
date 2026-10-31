@@ -1,0 +1,1 @@
+"""SalonMate AI backend package."""
